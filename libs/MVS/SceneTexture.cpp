@@ -64,6 +64,9 @@ using namespace MVS;
 #define TEXOPT_INFERENCE_LBP 1
 #define TEXOPT_INFERENCE TEXOPT_INFERENCE_LBP
 
+// uncomment to group patches into spatially cohesive textures
+#define TEXOPT_GROUP_PATCHES
+
 // inference algorithm
 #if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
 #include "../Math/LBP.h"
@@ -1982,6 +1985,123 @@ void MeshTexture::LocalSeamLeveling()
 	}
 }
 
+#ifdef TEXOPT_GROUP_PATCHES
+struct PatchApprox {
+	Point3f centroid;
+	Point3f U, V;
+	float uMin, uMax, vMin, vMax;
+};
+typedef CLISTDEF0IDX(PatchApprox, uint32_t) PatchApproxArr;
+
+// Compute the 3D centroid and average normal of a patch, then project its
+// vertices onto its local 2D tangent plane to get an accurate Oriented Bounding Box area.
+static PatchApprox ComputePatchApproximation(const Mesh::VertexArr& vertices, const Mesh::FaceArr& faces, const MeshTexture::TexturePatch& patch) {
+	// compute average centroid and average normal
+	Point3f centroid(0, 0, 0);
+	Point3f normal(0, 0, 0);
+	for (const FIndex idxFace : patch.faces) {
+		const Mesh::Face& face = faces[idxFace];
+		const Point3f& v0 = vertices[face[0]];
+		const Point3f& v1 = vertices[face[1]];
+		const Point3f& v2 = vertices[face[2]];
+		centroid += v0 + v1 + v2;
+		normal += normalized((v1 - v0).cross(v2 - v0));
+	}
+	centroid /= (float)(patch.faces.size() * 3);
+	normalize(normal);
+
+	// Create local 2D basis on the tangent plane
+	Point3f U= ABS(normal.x) < 0.9f ?
+		normalized(normal.cross(Point3f(1, 0, 0))) :
+		normalized(normal.cross(Point3f(0, 1, 0)));
+	Point3f V = normalized(normal.cross(U));
+
+	// Project all vertices to the local 2D plane to compute exact OBB bounds
+	AABB2f localBounds(true);
+	for (const FIndex idxFace : patch.faces) {
+		const Mesh::Face& face = faces[idxFace];
+		for (int i = 0; i < 3; ++i) {
+			const Point3f diff(vertices[face[i]] - centroid);
+			localBounds.InsertFull(Point2f(diff.dot(U), diff.dot(V)));
+		}
+	}
+
+	return {centroid, U, V, localBounds.ptMin[0], localBounds.ptMax[0], localBounds.ptMin[1], localBounds.ptMax[1]};
+}
+
+// Recursively partition patches into smaller spatial groups (KD-Tree approach)
+static void SplitPatchesSpatially(
+	const PatchApproxArr& approximations,
+	RectsBinPack::RectWIdxArr& unplacedRects,
+	int maxTextureSize,
+	int nTextureSizeMultiple,
+	std::vector<RectsBinPack::RectWIdxArr>& spatialGroups)
+{
+	// If the subset is empty, do nothing
+	if (unplacedRects.empty())
+		return;
+
+	// If this subset can fit exactly in one texture limit, accept it as a group
+	if (maxTextureSize <= 0 || RectsBinPack::ComputeTextureSize(unplacedRects, nTextureSizeMultiple) <= maxTextureSize) {
+		spatialGroups.emplace_back(std::move(unplacedRects));
+		return;
+	}
+
+	// Determine the longest axis by projecting the 4 corners of every 3D rectangle onto the global X, Y, and Z axes
+	AABB3f bounds(true);
+	for (const auto& rect : unplacedRects) {
+		const PatchApprox& approx = approximations[rect.patchIdx];
+		// 4 local corners
+		std::array<Point2f, 4> corners2D = {
+			Point2f(approx.uMin, approx.vMin), Point2f(approx.uMax, approx.vMin),
+			Point2f(approx.uMax, approx.vMax), Point2f(approx.uMin, approx.vMax)
+		};
+		// Project to global 3D space and accumulate bounds
+		for (int i = 0; i < 4; ++i)
+			bounds.InsertFull(Point3f(approx.centroid + approx.U * corners2D[i].x + approx.V * corners2D[i].y));
+	}
+
+	// Find longest physical spread axis
+	const Point3f dims(bounds.ptMax[0] - bounds.ptMin[0], bounds.ptMax[1] - bounds.ptMin[1], bounds.ptMax[2] - bounds.ptMin[2]);
+	int splitAxis = 0;
+	if (dims.y > dims.x && dims.y > dims.z) splitAxis = 1;
+	else if (dims.z > dims.x && dims.z > dims.y) splitAxis = 2;
+
+	// Sort patches along the longest geometric dimension
+	unplacedRects.Sort([splitAxis, &approximations](const RectsBinPack::RectWIdx& a, const RectsBinPack::RectWIdx& b) {
+		return approximations[a.patchIdx].centroid[splitAxis] < approximations[b.patchIdx].centroid[splitAxis];
+	});
+
+	// Find median split point balancing by area
+	uint64_t totalArea = 0;
+	for (const auto& rect : unplacedRects)
+		totalArea += (unsigned)rect.rect.area();
+	uint64_t currentArea = 0;
+	size_t splitIdx = 0;
+	FOREACH(i, unplacedRects) {
+		currentArea += unplacedRects[i].rect.area();
+		if (currentArea >= totalArea / 2) {
+			splitIdx = i + 1; // split exactly after this element
+			break;
+		}
+	}
+
+	// Fallback to strict array median if area balance fails edge cases
+	if (splitIdx == 0 || splitIdx >= unplacedRects.size())
+		splitIdx = unplacedRects.size() / 2;
+
+	// Perform the recursive split
+	RectsBinPack::RectWIdxArr leftHalf(splitIdx), rightHalf(unplacedRects.size() - splitIdx);
+	for (size_t i = 0; i < splitIdx; ++i)
+		leftHalf.emplace_back(unplacedRects[i]);
+	for (size_t i = splitIdx; i < unplacedRects.size(); ++i)
+		rightHalf.emplace_back(unplacedRects[i]);
+
+	SplitPatchesSpatially(approximations, leftHalf, maxTextureSize, nTextureSizeMultiple, spatialGroups);
+	SplitPatchesSpatially(approximations, rightHalf, maxTextureSize, nTextureSizeMultiple, spatialGroups);
+}
+#endif
+
 void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty, float fSharpnessWeight, int maxTextureSize)
 {
 	// project patches in the corresponding view and compute texture-coordinates and bounding-box
@@ -2084,14 +2204,24 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 	// create texture
 	{
 		// arrange texture patches to fit the smallest possible texture image
-		RectsBinPack::RectWIdxArr unplacedRects(texturePatches.size());
+		RectsBinPack::RectWIdxArr fullUnplacedRects(texturePatches.size());
 		FOREACH(i, texturePatches) {
 			if (maxTextureSize > 0 && (texturePatches[i].rect.width > maxTextureSize || texturePatches[i].rect.height > maxTextureSize)) {
 			    DEBUG("error: a patch of size %u x %u does not fit the texture", texturePatches[i].rect.width, texturePatches[i].rect.height);
 			    ABORT("the maximum texture size chosen cannot fit a patch");
 			}
-			unplacedRects[i] = {texturePatches[i].rect, i};
+			fullUnplacedRects[i] = {texturePatches[i].rect, i};
 		}
+		std::vector<RectsBinPack::RectWIdxArr> spatialGroups;
+		#ifdef TEXOPT_GROUP_PATCHES
+		// compute spatial approximations and partition the patches recursively
+		PatchApproxArr approximations(0u, texturePatches.size());
+		for (const auto& patch : texturePatches)
+			approximations.push_back(ComputePatchApproximation(vertices, faces, patch));
+		SplitPatchesSpatially(approximations, fullUnplacedRects, maxTextureSize, nTextureSizeMultiple, spatialGroups);
+		#else
+		spatialGroups.emplace_back(std::move(fullUnplacedRects));
+		#endif
 
 		// pack patches: one pack per texture file
 		CLISTDEF2IDX(RectsBinPack::RectWIdxArr, TexIndex) placedRects; {
@@ -2099,45 +2229,48 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 			const unsigned typeRectsBinPack(nRectPackingHeuristic/100);
 			const unsigned typeSplit((nRectPackingHeuristic-typeRectsBinPack*100)/10);
 			const unsigned typeHeuristic(nRectPackingHeuristic%10);
-			int textureSize = 0;
-			while (!unplacedRects.empty()) {
-				TD_TIMER_STARTD();
-				if (textureSize == 0) {
-					textureSize = RectsBinPack::ComputeTextureSize(unplacedRects, nTextureSizeMultiple);
-					if (maxTextureSize > 0 && textureSize > maxTextureSize)
-						textureSize = maxTextureSize;
-				}
 
-				RectsBinPack::RectWIdxArr newPlacedRects;
-				switch (typeRectsBinPack) {
-				case 0: {
-					MaxRectsBinPack pack(textureSize, textureSize);
-					newPlacedRects = pack.Insert(unplacedRects, (MaxRectsBinPack::FreeRectChoiceHeuristic)typeHeuristic);
-					break; }
-				case 1: {
-					SkylineBinPack pack(textureSize, textureSize, typeSplit!=0);
-					newPlacedRects = pack.Insert(unplacedRects, (SkylineBinPack::LevelChoiceHeuristic)typeHeuristic);
-					break; }
-				case 2: {
-					GuillotineBinPack pack(textureSize, textureSize);
-					newPlacedRects = pack.Insert(unplacedRects, false, (GuillotineBinPack::FreeRectChoiceHeuristic)typeHeuristic, (GuillotineBinPack::GuillotineSplitHeuristic)typeSplit);
-					break; }
-				default:
-					ABORT("error: unknown RectsBinPack type");
-				}
-				DEBUG_ULTIMATE("\tpacking texture completed: %u initial patches, %u placed patches, %u texture-size, %u textures (%s)", texturePatches.size(), newPlacedRects.size(), textureSize, placedRects.size(), TD_TIMER_GET_FMT().c_str());
+			for (auto& unplacedRects : spatialGroups) {
+				int textureSize = 0;
+				while (!unplacedRects.empty()) {
+					TD_TIMER_STARTD();
+					if (textureSize == 0) {
+						textureSize = RectsBinPack::ComputeTextureSize(unplacedRects, nTextureSizeMultiple);
+						if (maxTextureSize > 0 && textureSize > maxTextureSize)
+							textureSize = maxTextureSize;
+					}
 
-				if (textureSize == maxTextureSize || unplacedRects.empty()) {
-					// create texture image
-					placedRects.emplace_back(std::move(newPlacedRects));
-					texturesDiffuse.emplace_back(textureSize, textureSize).setTo(cv::Scalar(colEmpty.b, colEmpty.g, colEmpty.r));
-					textureSize = 0;
-				} else {
-					// try again with a bigger texture
-					textureSize *= 2;
-					if (maxTextureSize > 0)
-						textureSize = MINF(textureSize, maxTextureSize);
-					unplacedRects.JoinRemove(newPlacedRects);
+					RectsBinPack::RectWIdxArr newPlacedRects;
+					switch (typeRectsBinPack) {
+					case 0: {
+						MaxRectsBinPack pack(textureSize, textureSize);
+						newPlacedRects = pack.Insert(unplacedRects, (MaxRectsBinPack::FreeRectChoiceHeuristic)typeHeuristic);
+						break; }
+					case 1: {
+						SkylineBinPack pack(textureSize, textureSize, typeSplit!=0);
+						newPlacedRects = pack.Insert(unplacedRects, (SkylineBinPack::LevelChoiceHeuristic)typeHeuristic);
+						break; }
+					case 2: {
+						GuillotineBinPack pack(textureSize, textureSize);
+						newPlacedRects = pack.Insert(unplacedRects, false, (GuillotineBinPack::FreeRectChoiceHeuristic)typeHeuristic, (GuillotineBinPack::GuillotineSplitHeuristic)typeSplit);
+						break; }
+					default:
+						ABORT("error: unknown RectsBinPack type");
+					}
+					DEBUG_ULTIMATE("\tpacking texture completed: %u initial patches, %u placed patches, %u texture-size, %u textures (%s)", texturePatches.size(), newPlacedRects.size(), textureSize, placedRects.size(), TD_TIMER_GET_FMT().c_str());
+
+					if (textureSize == maxTextureSize || unplacedRects.empty()) {
+						// create texture image
+						placedRects.emplace_back(std::move(newPlacedRects));
+						texturesDiffuse.emplace_back(textureSize, textureSize).setTo(cv::Scalar(colEmpty.b, colEmpty.g, colEmpty.r));
+						textureSize = 0;
+					} else {
+						// try again with a bigger texture
+						textureSize *= 2;
+						if (maxTextureSize > 0)
+							textureSize = MINF(textureSize, maxTextureSize);
+						unplacedRects.JoinRemove(newPlacedRects);
+					}
 				}
 			}
 		}
