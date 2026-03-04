@@ -62,6 +62,7 @@ using namespace MVS;
 
 // method used to find optimal view per face
 #define TEXOPT_INFERENCE_LBP 1
+#define TEXOPT_INFERENCE_MAPMAP 2
 #define TEXOPT_INFERENCE TEXOPT_INFERENCE_LBP
 
 // uncomment to group patches into spatially cohesive textures
@@ -76,6 +77,15 @@ constexpr LBPInference::EnergyType LBPMinWeight(0.5f);
 // Potts model as smoothness function
 LBPInference::EnergyType STCALL SmoothnessPotts(LBPInference::NodeID, LBPInference::NodeID, LBPInference::LabelID l1, LBPInference::LabelID l2) {
 	return l1 == l2 && l1 != 0 && l2 != 0 ? LBPInference::EnergyType(0) : LBPMaxEnergy;
+}
+}
+#elif TEXOPT_INFERENCE == TEXOPT_INFERENCE_MAPMAP
+#include "../Math/MapMapInference.h"
+namespace MVS {
+constexpr SEACAVE::MapMapInference::EnergyType MapMapMaxEnergy(1);
+// Potts model as smoothness function (same semantics as LBP for mapMAP solver)
+SEACAVE::MapMapInference::EnergyType STCALL SmoothnessPottsMapMap(SEACAVE::MapMapInference::NodeID, SEACAVE::MapMapInference::NodeID, SEACAVE::MapMapInference::LabelID l1, SEACAVE::MapMapInference::LabelID l2) {
+	return l1 == l2 && l1 != 0 && l2 != 0 ? SEACAVE::MapMapInference::EnergyType(0) : MapMapMaxEnergy;
 }
 }
 #endif
@@ -1157,6 +1167,52 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 				FOREACH(l, labels) {
 					labels[l] = virtualLabels[mapFaceToVirtualFace[l]];
 				}
+				#elif TEXOPT_INFERENCE == TEXOPT_INFERENCE_MAPMAP
+				// initialize mapMAP inference structures
+				const SEACAVE::MapMapInference::EnergyType MaxEnergy(fRatioDataSmoothness*MapMapMaxEnergy);
+				SEACAVE::MapMapInference inference; {
+					inference.SetNumNodes((SEACAVE::MapMapInference::NodeID)virtualFaces.size());
+					inference.SetSmoothCost(SmoothnessPottsMapMap);
+					EdgeOutIter ei, eie;
+					FOREACH(f, virtualFaces) {
+						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
+							ASSERT(f == (FIndex)ei->m_source);
+							const FIndex fAdj((FIndex)ei->m_target);
+							if (f < fAdj) // add edges only once
+								inference.SetNeighbors((SEACAVE::MapMapInference::NodeID)f, (SEACAVE::MapMapInference::NodeID)fAdj);
+						}
+					}
+				}
+
+				// set data costs for all labels (except label 0 - undefined)
+				FOREACH(f, virtualFacesDatas) {
+					const FaceDataArr& faceDatas = virtualFacesDatas[f];
+					if (faceDatas.empty()) {
+						// set costs for label 0 (undefined)
+						inference.SetDataCost(0, (SEACAVE::MapMapInference::NodeID)f, MaxEnergy);
+						continue;
+					}
+					for (const FaceData& faceData: faceDatas) {
+						const SEACAVE::MapMapInference::LabelID label((SEACAVE::MapMapInference::LabelID)faceData.idxView+1);
+						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
+						inference.SetDataCost(label, (SEACAVE::MapMapInference::NodeID)f, dataCost);
+					}
+				}
+
+				inference.Optimize();
+
+				LabelArr virtualLabels(virtualFaces.size());
+				virtualLabels.Memset(0xFF);
+				FOREACH(l, virtualLabels) {
+					const SEACAVE::MapMapInference::LabelID label(inference.GetLabel((SEACAVE::MapMapInference::NodeID)l));
+					ASSERT(label < images.size()+1);
+					if (label > 0)
+						virtualLabels[l] = (Label)(label-1);
+				}
+				FOREACH(l, labels) {
+					labels[l] = virtualLabels[mapFaceToVirtualFace[l]];
+				}
 				#endif
 			}
 
@@ -1256,6 +1312,48 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 					ASSERT(label < images.size()+1);
 					if (label > 0)
 						labels[l] = label-1;
+				}
+				#elif TEXOPT_INFERENCE == TEXOPT_INFERENCE_MAPMAP
+				// initialize mapMAP inference structures
+				const SEACAVE::MapMapInference::EnergyType MaxEnergy(fRatioDataSmoothness*MapMapMaxEnergy);
+				SEACAVE::MapMapInference inference; {
+					inference.SetNumNodes((SEACAVE::MapMapInference::NodeID)faces.size());
+					inference.SetSmoothCost(SmoothnessPottsMapMap);
+					EdgeOutIter ei, eie;
+					FOREACH(f, faces) {
+						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
+							ASSERT(f == (FIndex)ei->m_source);
+							const FIndex fAdj((FIndex)ei->m_target);
+							if (f < fAdj) // add edges only once
+								inference.SetNeighbors((SEACAVE::MapMapInference::NodeID)f, (SEACAVE::MapMapInference::NodeID)fAdj);
+						}
+					}
+				}
+
+				// set data costs for all labels (except label 0 - undefined)
+				FOREACH(f, facesDatas) {
+					const FaceDataArr& faceDatas = facesDatas[f];
+					if (faceDatas.empty()) {
+						// set costs for label 0 (undefined)
+						inference.SetDataCost(0, (SEACAVE::MapMapInference::NodeID)f, MaxEnergy);
+						continue;
+					}
+					for (const FaceData& faceData: faceDatas) {
+						const SEACAVE::MapMapInference::LabelID label((SEACAVE::MapMapInference::LabelID)faceData.idxView+1);
+						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
+						inference.SetDataCost(label, (SEACAVE::MapMapInference::NodeID)f, dataCost);
+					}
+				}
+
+				inference.Optimize();
+
+				labels.Memset(0xFF);
+				FOREACH(l, labels) {
+					const SEACAVE::MapMapInference::LabelID label(inference.GetLabel((SEACAVE::MapMapInference::NodeID)l));
+					ASSERT(label < images.size()+1);
+					if (label > 0)
+						labels[l] = (Label)(label-1);
 				}
 				#endif
 			}

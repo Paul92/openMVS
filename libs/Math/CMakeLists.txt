@@ -1,5 +1,8 @@
 INCLUDE_DIRECTORIES(".")
 
+# mapmap (header-only) for MapMapInference / TEXOPT_INFERENCE_MAPMAP
+find_package(mapmap-cpu CONFIG REQUIRED)
+
 # List sources files
 FILE(GLOB LIBRARY_FILES_C "*.cpp")
 FILE(GLOB LIBRARY_FILES_H "*.h" "*.inl")
@@ -24,7 +27,7 @@ IF(CMAKE_VERSION VERSION_GREATER_EQUAL 3.16.0)
 endif()
 
 # Link its dependencies
-TARGET_LINK_LIBRARIES(Math PUBLIC Common)
+TARGET_LINK_LIBRARIES(Math PUBLIC Common mapmap-cpu::mapmap-cpu)
 
 # Install
 INSTALL(FILES ${LIBRARY_FILES_H} DESTINATION "${INSTALL_INCLUDE_DIR}/Math")
