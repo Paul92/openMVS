@@ -18,16 +18,11 @@
 #include <algorithm>
 #include <random>
 
-#include <oneapi/tbb//task_group.h>
+#include <mapmap/source/parallel.h>
 
-#include <oneapi/tbb//concurrent_queue.h>
-#include <oneapi/tbb//concurrent_vector.h>
-#include <oneapi/tbb//concurrent_unordered_set.h>
-#include <oneapi/tbb//blocked_range.h>
-#include <oneapi/tbb//parallel_for.h>
 
 #include <mapmap/header/graph.h>
-#include <ext/dset/dset.h>
+#include <mapmap/ext/dset/dset.h>
 
 NS_MAPMAP_BEGIN
 
@@ -351,7 +346,7 @@ update_components()
         /* find random oder for start nodes */
         std::vector<luint_t> nodes(m_nodes.size());
         std::iota(nodes.begin(), nodes.end(), 0);
-#if __cplusplus > 201100L
+#if MAPMAP_USE_STD_SHUFFLE
         std::random_device rd;
         std::mt19937 g(rd());
         std::shuffle(nodes.begin(), nodes.end(), g);

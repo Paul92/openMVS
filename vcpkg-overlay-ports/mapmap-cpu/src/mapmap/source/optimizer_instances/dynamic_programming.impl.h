@@ -7,11 +7,14 @@
  * of the BSD license. See the LICENSE file for details.
  */
 
+#include <algorithm>
+#include <cstddef>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <iostream>
-
-#include <oneapi/tbb/parallel_for_each.h>
+#include <numeric>
+#include <atomic>
 
 #include <mapmap/header/optimizer_instances/dynamic_programming.h>
 #include <mapmap/header/optimizer_instances/dp_node.h>
@@ -132,8 +135,7 @@ CombinatorialDynamicProgramming<COSTTYPE, SIMDWIDTH>::
 CombinatorialDynamicProgramming()
 : m_level(0),
   m_level_size(0),
-  m_value_allocator((tbb::tbb_allocator<_s_t<COSTTYPE, SIMDWIDTH>>*)
-    (new tbb::cache_aligned_allocator<_s_t<COSTTYPE, SIMDWIDTH>>))
+  m_value_allocator(new std::allocator<_s_t<COSTTYPE, SIMDWIDTH>>())
 {
 
 }
@@ -189,35 +191,16 @@ void
 CombinatorialDynamicProgramming<COSTTYPE, SIMDWIDTH>::
 discover_leaves()
 {
-    tbb::blocked_range<luint_t> tree_range(0, this->m_tree->num_graph_nodes());
-    std::vector<luint_t> leaf_list(this->m_tree->num_graph_nodes(),
-        (luint_t) 0);
-    std::vector<luint_t> leaf_offsets(this->m_tree->num_graph_nodes(),
-        (luint_t) 0);
+    const luint_t num_nodes = this->m_tree->num_graph_nodes();
 
-    /* Leaf = node without children, count offsets */
-    tbb::parallel_for(tree_range,
-        [&](const tbb::blocked_range<luint_t>& r)
-        {
-            for(luint_t i = r.begin(); i != r.end(); ++i)
-                leaf_list[i] = (this->m_tree->node(i).is_in_tree &&
-                    this->m_tree->node(i).degree == 0);
-        });
-
-    PlusScan<luint_t, luint_t> p_scan(&leaf_list[0], &leaf_offsets[0]);
-    tbb::parallel_scan(tree_range, p_scan);
-    const luint_t num_leaves = leaf_offsets.back() + leaf_list.back();
-
-    /* save leaf IDs in vector */
-    m_leaf_ids = std::vector<luint_t>(num_leaves, invalid_luint_t);
-
-    tbb::parallel_for(tree_range,
-        [&](const tbb::blocked_range<luint_t>& r)
-        {
-            for(luint_t i = r.begin(); i != r.end(); ++i)
-                if(leaf_list[i] > 0)
-                    m_leaf_ids[leaf_offsets[i]] = i;
-        });
+    /* find leaves: nodes without children that are in the tree */
+    m_leaf_ids.clear();
+    for(luint_t i = 0; i < num_nodes; ++i)
+    {
+        if(this->m_tree->node(i).is_in_tree &&
+           this->m_tree->node(i).degree == 0)
+            m_leaf_ids.push_back(i);
+    }
 }
 
 /* ************************************************************************** */
@@ -228,37 +211,34 @@ void
 CombinatorialDynamicProgramming<COSTTYPE, SIMDWIDTH>::
 allocate_memory()
 {
-    tbb::blocked_range<luint_t> node_range(0, this->m_tree->num_graph_nodes(),
-        32u);
+    const luint_t num_nodes = this->m_tree->num_graph_nodes();
 
     /* create pointer table for nodes' value tables (and their sizes) */
-    m_opt_value_nodes = std::vector<_s_t<COSTTYPE, SIMDWIDTH>*>(
-        this->m_tree->num_graph_nodes());
-    m_opt_value_sizes = std::vector<_iv_st<COSTTYPE, SIMDWIDTH>>(
-        this->m_tree->num_graph_nodes());
+    m_opt_value_nodes = std::vector<_s_t<COSTTYPE, SIMDWIDTH>*>(num_nodes);
+    m_opt_value_sizes = std::vector<_iv_st<COSTTYPE, SIMDWIDTH>>(num_nodes);
 
-    /* allocate memory to hold the DP table for indices for all nodes */
-    std::vector<luint_t> lbl_set_sizes(this->m_tree->num_graph_nodes(),
-        (luint_t) 0);
-    std::vector<luint_t> lbl_set_offsets(this->m_tree->num_graph_nodes(),
-        (luint_t) 0);
+    /* compute label set sizes and offsets */
+    std::vector<luint_t> lbl_set_sizes(num_nodes, (luint_t) 0);
+    std::vector<luint_t> lbl_set_offsets(num_nodes, (luint_t) 0);
 
-    tbb::parallel_for(node_range,
-        [&](const tbb::blocked_range<luint_t>& r)
-        {
-            for(luint_t i = r.begin(); i != r.end(); ++i)
-            {
-                /* root nodes (= self-parented) are included here */
-                if(this->m_tree->node(i).parent_id != invalid_luint_t)
-                    lbl_set_sizes[i] = SIMDWIDTH * DIV_UP(
-                        this->m_label_set->label_set_size(
-                        this->m_tree->node(i).parent_id), SIMDWIDTH);
-            }
-        });
+    #pragma omp parallel for schedule(static)
+    for(std::ptrdiff_t i_p = 0; i_p < static_cast<std::ptrdiff_t>(num_nodes); ++i_p)
+    {
+        const luint_t i = static_cast<luint_t>(i_p);
+        if(this->m_tree->node(i).parent_id != invalid_luint_t)
+            lbl_set_sizes[i] = SIMDWIDTH * DIV_UP(
+                this->m_label_set->label_set_size(
+                this->m_tree->node(i).parent_id), SIMDWIDTH);
+    }
 
-    PlusScan<luint_t, luint_t> p_scan(&lbl_set_sizes[0], &lbl_set_offsets[0]);
-    tbb::parallel_scan(node_range, p_scan);
-    const luint_t total_mem_req = lbl_set_offsets.back() + lbl_set_sizes.back();
+    /* exclusive prefix sum for offsets */
+    luint_t running_sum = 0;
+    for(luint_t i = 0; i < num_nodes; ++i)
+    {
+        lbl_set_offsets[i] = running_sum;
+        running_sum += lbl_set_sizes[i];
+    }
+    const luint_t total_mem_req = running_sum;
 
     /* index table for all nodes */
     m_opt_labels = std::vector<_iv_st<COSTTYPE, SIMDWIDTH>>(total_mem_req,
@@ -270,24 +250,21 @@ allocate_memory()
 #endif
 
     /* create pointer tables for indices for all nodes */
-    m_opt_label_nodes = std::vector<_iv_st<COSTTYPE, SIMDWIDTH>*>(
-        this->m_tree->num_graph_nodes());
+    m_opt_label_nodes = std::vector<_iv_st<COSTTYPE, SIMDWIDTH>*>(num_nodes);
 
-    /* save offsets into index table for all nodes */
-    tbb::parallel_for(node_range,
-        [&](const tbb::blocked_range<luint_t>& r)
+    /* save offsets into tables for all nodes */
+    #pragma omp parallel for schedule(static)
+    for(std::ptrdiff_t i_p = 0; i_p < static_cast<std::ptrdiff_t>(num_nodes); ++i_p)
+    {
+        const luint_t i = static_cast<luint_t>(i_p);
+        if(this->m_tree->node(i).parent_id != invalid_luint_t)
         {
-            for(luint_t i = r.begin(); i != r.end(); ++i)
-                if(this->m_tree->node(i).parent_id != invalid_luint_t)
-                {
-                    m_opt_label_nodes[i] = &m_opt_labels[0] +
-                        lbl_set_offsets[i];
+            m_opt_label_nodes[i] = &m_opt_labels[0] + lbl_set_offsets[i];
 #ifndef BUILD_MEMORY_SAVE
-                    m_opt_value_nodes[i] = &m_opt_values[0] +
-                        lbl_set_offsets[i];
+            m_opt_value_nodes[i] = &m_opt_values[0] + lbl_set_offsets[i];
 #endif
-                }
-        });
+        }
+    }
 }
 
 /* ************************************************************************** */
@@ -339,81 +316,100 @@ void
 CombinatorialDynamicProgramming<COSTTYPE, SIMDWIDTH>::
 bottom_up_opt()
 {
-    /* mark the number of unprocessed children atomically per node */
-    std::vector<std::atomic<luint_t>> unproc_children(
-        this->m_tree->num_graph_nodes());
-    std::fill(unproc_children.begin(), unproc_children.end(), 0);
+    const luint_t num_nodes = this->m_tree->num_graph_nodes();
 
-    /* fill child counter for all node's parents */
-    tbb::blocked_range<luint_t> node_range(0, this->m_graph->num_nodes());
-    tbb::parallel_for(node_range,
-        [&](const tbb::blocked_range<luint_t>& r)
+    /* count unprocessed children per node */
+    std::vector<std::atomic<luint_t>> unproc_children(num_nodes);
+    for(luint_t i = 0; i < num_nodes; ++i)
+        unproc_children[i].store(this->m_tree->node(i).degree);
+
+    /*
+     * Level-wise parallel bottom-up traversal using OpenMP.
+     * Process all ready nodes at the current level in parallel,
+     * then collect the next level's ready nodes.
+     */
+    std::vector<luint_t> current_level(m_leaf_ids.begin(), m_leaf_ids.end());
+    std::vector<luint_t> next_level;
+
+    while(!current_level.empty())
+    {
+        next_level.clear();
+
+        /* Each thread gets its own allocator for scratch memory */
+        #pragma omp parallel
         {
-            for(luint_t i = r.begin(); i != r.end(); ++i)
-                unproc_children[i] = this->m_tree->node(i).degree;
-        });
+            /* thread-local allocator avoids contention on std::allocator */
+            std::allocator<_s_t<COSTTYPE, SIMDWIDTH>> local_alloc;
+            auto local_alloc_ptr = tbb_allocator_ptr<_s_t<COSTTYPE, SIMDWIDTH>>(
+                &local_alloc, [](std::allocator<_s_t<COSTTYPE, SIMDWIDTH>>*){});
 
-    /* use feeder instead of level-wise queue */
-    tbb::concurrent_vector<luint_t> queue;
-    queue.assign(m_leaf_ids.begin(), m_leaf_ids.end());
-
-    int processed = 0;
-    tbb::parallel_for_each(queue.begin(), queue.end(),
-        [&](const luint_t n, tbb::feeder<luint_t>& feeder)
-        {
-            /* allocate memory */
-#if defined(BUILD_MEMORY_SAVE)
-            node_memory_allocate(n);
-#endif
-
-            /* create a bundle with all necessary information for DP */
-            DPNode<COSTTYPE, SIMDWIDTH> dpb;
-            dpb.c_node = this->m_tree->node(n);
-            dpb.c_graph = this->m_graph;
-            dpb.c_labels = this->m_label_set;
-            dpb.c_unary = this->m_cbundle->get_unary_costs(n);
-            dpb.c_pairwise = this->m_cbundle->get_pairwise_costs(
-                dpb.c_node.to_parent_edge_id);
-            dpb.c_child_values = &m_opt_value_nodes;
-            dpb.c_child_labels = &m_opt_label_nodes;
-            dpb.c_assignment = &this->m_current_assignment;
-            dpb.respect_dependencies = this->m_uses_dependencies;
-            dpb.c_opt_values = m_opt_value_nodes[n];
-            dpb.c_opt_labels = m_opt_label_nodes[n];
-
-            /* retrieve cost functions for dependencies */
-            dpb.c_dep_costs.resize(dpb.c_node.dependency_degree);
-            for(luint_t i = 0; i < dpb.c_node.dependency_degree; ++i)
-                dpb.c_dep_costs[i] = this->m_cbundle->get_pairwise_costs(
-                    dpb.c_node.dependency_edge_ids[i]);
-
-            /* create one table entry per node */
-            DynamicProgrammingTableEntry<COSTTYPE, SIMDWIDTH> dpe(&dpb,
-                m_value_allocator);
-
-            /* delegate optimization! */
-            dpe.optimize_entry();
-
-            /* decrement parent's unprocessed children counter */
-            const luint_t parent_id = this->m_tree->node(n).parent_id;
-            if(parent_id != n && unproc_children[parent_id].
-                fetch_sub((luint_t) 1) == (luint_t) 1)
+            #pragma omp for schedule(dynamic, 64)
+            for(std::ptrdiff_t idx = 0; idx < static_cast<std::ptrdiff_t>(current_level.size()); ++idx)
             {
-                /* last child processed: push parent into next level */
-                feeder.add(parent_id);
-            }
+                const luint_t n = current_level[static_cast<size_t>(idx)];
 
-            /* free children's memory */
 #if defined(BUILD_MEMORY_SAVE)
-            node_memory_clean_children(n);
+                node_memory_allocate(n);
 #endif
 
-            /* for roots - record for top-down pass */
-            if(parent_id == n)
-                m_root_ids.push_back(n);
+                /* create a bundle with all necessary information for DP */
+                DPNode<COSTTYPE, SIMDWIDTH> dpb;
+                dpb.c_node = this->m_tree->node(n);
+                dpb.c_graph = this->m_graph;
+                dpb.c_labels = this->m_label_set;
+                dpb.c_unary = this->m_cbundle->get_unary_costs(n);
+                dpb.c_pairwise = this->m_cbundle->get_pairwise_costs(
+                    dpb.c_node.to_parent_edge_id);
+                dpb.c_child_values = &m_opt_value_nodes;
+                dpb.c_child_labels = &m_opt_label_nodes;
+                dpb.c_assignment = &this->m_current_assignment;
+                dpb.respect_dependencies = this->m_uses_dependencies;
+                dpb.c_opt_values = m_opt_value_nodes[n];
+                dpb.c_opt_labels = m_opt_label_nodes[n];
 
-            ++processed;
-        });
+                /* retrieve cost functions for dependencies */
+                dpb.c_dep_costs.resize(dpb.c_node.dependency_degree);
+                for(luint_t i = 0; i < dpb.c_node.dependency_degree; ++i)
+                    dpb.c_dep_costs[i] = this->m_cbundle->get_pairwise_costs(
+                        dpb.c_node.dependency_edge_ids[i]);
+
+                /* create one table entry per node */
+                DynamicProgrammingTableEntry<COSTTYPE, SIMDWIDTH> dpe(&dpb,
+                    local_alloc_ptr);
+
+                /* delegate optimization! */
+                dpe.optimize_entry();
+
+#if defined(BUILD_MEMORY_SAVE)
+                node_memory_clean_children(n);
+#endif
+            }
+        } /* end omp parallel */
+
+        /* Collect next level: check which parents are now ready (sequential) */
+        for(luint_t idx = 0; idx < current_level.size(); ++idx)
+        {
+            const luint_t n = current_level[idx];
+            const luint_t parent_id = this->m_tree->node(n).parent_id;
+
+            if(parent_id == n)
+            {
+                /* root node */
+                m_root_ids.push_back(n);
+            }
+            else
+            {
+                luint_t prev = unproc_children[parent_id].fetch_sub(1);
+                if(prev == 1)
+                {
+                    /* all children done, parent is ready */
+                    next_level.push_back(parent_id);
+                }
+            }
+        }
+
+        current_level.swap(next_level);
+    }
 }
 
 /* ************************************************************************** */
@@ -425,65 +421,72 @@ CombinatorialDynamicProgramming<COSTTYPE, SIMDWIDTH>::
 top_down_opt(
     std::vector<_iv_st<COSTTYPE, SIMDWIDTH>>& solution)
 {
-    /* find minimum label (index) for each root */
-    tbb::concurrent_vector<luint_t> queue;
-    queue.reserve(this->m_graph->num_nodes());
-    tbb::blocked_range<luint_t> root_range(0, m_root_ids.size());
+    /* Collect root children as first level */
+    std::vector<luint_t> current_level;
 
-    tbb::parallel_for(root_range,
-        [&](const tbb::blocked_range<luint_t>& r)
+    for(luint_t i = 0; i < m_root_ids.size(); ++i)
+    {
+        const luint_t root = m_root_ids[i];
+        const uint_t r_label_set_size = this->m_label_set->
+            label_set_size(root);
+
+        const _s_t<COSTTYPE, SIMDWIDTH> * my_costs =
+            m_opt_value_nodes[root];
+        const _iv_st<COSTTYPE, SIMDWIDTH> * my_labels =
+            m_opt_label_nodes[root];
+
+        _s_t<COSTTYPE, SIMDWIDTH> min_costs = my_costs[0];
+        _iv_st<COSTTYPE, SIMDWIDTH> min_label = my_labels[0];
+        for(uint_t l_i = 1; l_i < r_label_set_size; ++l_i)
         {
-            for(luint_t i = r.begin(); i != r.end(); ++i)
+            if(my_costs[l_i] < min_costs)
             {
-                const luint_t root = m_root_ids[i];
-                const uint_t r_label_set_size = this->m_label_set->
-                    label_set_size(root);
-
-                const _s_t<COSTTYPE, SIMDWIDTH> * my_costs =
-                    m_opt_value_nodes[root];
-                const _iv_st<COSTTYPE, SIMDWIDTH> * my_labels =
-                    m_opt_label_nodes[root];
-
-                _s_t<COSTTYPE, SIMDWIDTH> min_costs = my_costs[0];
-                _iv_st<COSTTYPE, SIMDWIDTH> min_label = my_labels[0];
-                for(uint_t l_i = 1; l_i < r_label_set_size; ++l_i)
-                {
-                    if(my_costs[l_i] < min_costs)
-                    {
-                        min_costs = my_costs[l_i];
-                        min_label = my_labels[l_i];
-                    }
-                }
-
-                solution[root] = min_label;
-
-                /* add children to queue */
-                for(luint_t i = 0; i < this->m_tree->node(root).degree; ++i)
-                    queue.push_back(this->m_tree->node(root).children_ids[i]);
+                min_costs = my_costs[l_i];
+                min_label = my_labels[l_i];
             }
-        });
+        }
 
-    /* continue traversal */
-    tbb::parallel_for_each(queue.begin(), queue.end(),
-        [&](const luint_t n, tbb::feeder<luint_t>& feeder)
+        solution[root] = min_label;
+
+        /* add children to first level */
+        for(luint_t c = 0; c < this->m_tree->node(root).degree; ++c)
+            current_level.push_back(this->m_tree->node(root).children_ids[c]);
+    }
+
+    /* Level-wise parallel top-down traversal */
+    std::vector<luint_t> next_level;
+
+    while(!current_level.empty())
+    {
+        next_level.clear();
+
+        /* assign labels in parallel - each node reads only its parent's label */
+        #pragma omp parallel for schedule(static)
+        for(std::ptrdiff_t idx = 0; idx < static_cast<std::ptrdiff_t>(current_level.size()); ++idx)
         {
-            /* retrieve current node */
-            const TreeNode<COSTTYPE>& node =
-                this->m_tree->node(n);
+            const luint_t n = current_level[static_cast<size_t>(idx)];
+            const TreeNode<COSTTYPE>& node = this->m_tree->node(n);
 
-            /* retrieve parent's label (index) */
             const _iv_st<COSTTYPE, SIMDWIDTH> p_label =
                 solution[node.parent_id];
 
-            /* set n's label (index) */
             const _iv_st<COSTTYPE, SIMDWIDTH> * my_labels =
                 m_opt_label_nodes[n];
             solution[n] = my_labels[p_label];
+        }
 
-            /* add children to queue */
-            for(luint_t i = 0; i < node.degree; ++i)
-                feeder.add(node.children_ids[i]);
-        });
+        /* collect next level's children (sequential) */
+        for(luint_t idx = 0; idx < current_level.size(); ++idx)
+        {
+            const luint_t n = current_level[idx];
+            const TreeNode<COSTTYPE>& node = this->m_tree->node(n);
+
+            for(luint_t c = 0; c < node.degree; ++c)
+                next_level.push_back(node.children_ids[c]);
+        }
+
+        current_level.swap(next_level);
+    }
 }
 
 /* ************************************************************************** */

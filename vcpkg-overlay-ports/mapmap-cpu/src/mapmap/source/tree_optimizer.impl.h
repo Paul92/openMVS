@@ -8,9 +8,7 @@
  */
 #include <mapmap/header/tree_optimizer.h>
 
-#include <oneapi/tbb/blocked_range.h>
-#include <oneapi/tbb/parallel_reduce.h>
-
+#include <cstddef>
 #include <iostream>
 
 NS_MAPMAP_BEGIN
@@ -103,100 +101,76 @@ TreeOptimizer<COSTTYPE, SIMDWIDTH>::
 objective(
     const std::vector<_iv_st<COSTTYPE, SIMDWIDTH>>& solution)
 {
-    _s_t<COSTTYPE, SIMDWIDTH> objective = (COSTTYPE) 0;
-    tbb::blocked_range<luint_t> node_range(0, m_graph->num_nodes());
-    tbb::blocked_range<luint_t> edge_range(0, m_graph->edges().size());
+    _s_t<COSTTYPE, SIMDWIDTH> obj = (COSTTYPE) 0;
+    const luint_t num_nodes = m_graph->num_nodes();
+    const luint_t num_edges = m_graph->edges().size();
 
-    /* unary costs */
-    objective += tbb::parallel_deterministic_reduce(node_range, (COSTTYPE) 0,
-        [&](const tbb::blocked_range<luint_t>& r, COSTTYPE reduced)
+    /* unary costs - OpenMP parallel reduction */
+    _s_t<COSTTYPE, SIMDWIDTH> unary_sum = (COSTTYPE) 0;
+    #pragma omp parallel for reduction(+:unary_sum) schedule(static)
+    for(std::ptrdiff_t n_p = 0; n_p < static_cast<std::ptrdiff_t>(num_nodes); ++n_p)
+    {
+        const luint_t n = static_cast<luint_t>(n_p);
+        _s_t<COSTTYPE, SIMDWIDTH> tmp[SIMDWIDTH];
+        const UnaryCosts<COSTTYPE, SIMDWIDTH> * ucosts =
+            m_cbundle->get_unary_costs(n);
+
+        const uint_t n_l = solution[n];
+
+        _v_t<COSTTYPE, SIMDWIDTH> u_costs;
+        if(ucosts->supports_enumerable_costs())
         {
-            _s_t<COSTTYPE, SIMDWIDTH> tmp[SIMDWIDTH];
-            _s_t<COSTTYPE, SIMDWIDTH> my_chunk = reduced;
-
-            for(luint_t n = r.begin(); n != r.end(); ++n)
-            {
-                const UnaryCosts<COSTTYPE, SIMDWIDTH> * ucosts =
-                    m_cbundle->get_unary_costs(n);
-
-                /* determine label index for node n */
-                const uint_t n_l = solution[n];
-
-                _v_t<COSTTYPE, SIMDWIDTH> u_costs;
-                if(ucosts->supports_enumerable_costs())
-                {
-                    u_costs = ucosts->get_unary_costs_enum_offset(n_l);
-                }
-                else
-                {
-                    /* translate to label */
-                    const _iv_st<COSTTYPE, SIMDWIDTH> l =
-                        m_label_set->label_from_offset(n, n_l);
-
-                    /* get cost vector */
-                    u_costs = ucosts->
-                        get_unary_costs(iv_init<COSTTYPE, SIMDWIDTH>(l));
-                }
-
-                v_store<COSTTYPE, SIMDWIDTH>(u_costs, tmp);
-                my_chunk += tmp[0];
-            }
-
-            return my_chunk;
-        },
-        std::plus<COSTTYPE>());
-
-    /* pairwise costs */
-    objective += tbb::parallel_deterministic_reduce(edge_range, (COSTTYPE) 0,
-        [&](const tbb::blocked_range<luint_t>& r, COSTTYPE reduced)
+            u_costs = ucosts->get_unary_costs_enum_offset(n_l);
+        }
+        else
         {
-            _s_t<COSTTYPE, SIMDWIDTH> tmp[SIMDWIDTH];
-            _s_t<COSTTYPE, SIMDWIDTH> my_chunk = reduced;
+            const _iv_st<COSTTYPE, SIMDWIDTH> l =
+                m_label_set->label_from_offset(n, n_l);
+            u_costs = ucosts->
+                get_unary_costs(iv_init<COSTTYPE, SIMDWIDTH>(l));
+        }
 
-            for(luint_t e = r.begin(); e != r.end(); ++e)
-            {
-                const PairwiseCosts<COSTTYPE, SIMDWIDTH> * pcosts =
-                    m_cbundle->get_pairwise_costs(e);
+        v_store<COSTTYPE, SIMDWIDTH>(u_costs, tmp);
+        unary_sum += tmp[0];
+    }
+    obj += unary_sum;
 
-                /* determine label (indices) for both nodes */
-                const luint_t n_a = m_graph->edges()[e].node_a;
-                const luint_t n_b = m_graph->edges()[e].node_b;
-                const _s_t<COSTTYPE, SIMDWIDTH> e_weight =
-                    m_graph->edges()[e].weight;
+    /* pairwise costs - OpenMP parallel reduction */
+    _s_t<COSTTYPE, SIMDWIDTH> pairwise_sum = (COSTTYPE) 0;
+    #pragma omp parallel for reduction(+:pairwise_sum) schedule(static)
+    for(std::ptrdiff_t e_p = 0; e_p < static_cast<std::ptrdiff_t>(num_edges); ++e_p)
+    {
+        const luint_t e = static_cast<luint_t>(e_p);
+        _s_t<COSTTYPE, SIMDWIDTH> tmp[SIMDWIDTH];
+        const PairwiseCosts<COSTTYPE, SIMDWIDTH> * pcosts =
+            m_cbundle->get_pairwise_costs(e);
 
-                const _iv_st<COSTTYPE, SIMDWIDTH> n_a_l_i = solution[n_a];
-                const _iv_st<COSTTYPE, SIMDWIDTH> n_b_l_i = solution[n_b];
+        const luint_t n_a = m_graph->edges()[e].node_a;
+        const luint_t n_b = m_graph->edges()[e].node_b;
+        const _s_t<COSTTYPE, SIMDWIDTH> e_weight =
+            m_graph->edges()[e].weight;
 
-                /* translate to labels */
-                const _iv_st<COSTTYPE, SIMDWIDTH> n_a_l =
-                    m_label_set->label_from_offset(n_a, n_a_l_i);
-                const _iv_st<COSTTYPE, SIMDWIDTH> n_b_l =
-                    m_label_set->label_from_offset(n_b, n_b_l_i);
+        const _iv_st<COSTTYPE, SIMDWIDTH> n_a_l_i = solution[n_a];
+        const _iv_st<COSTTYPE, SIMDWIDTH> n_b_l_i = solution[n_b];
 
-                /* get cost vector */
-                _v_t<COSTTYPE, SIMDWIDTH> p_costs =
-                    v_init<COSTTYPE, SIMDWIDTH>();
+        const _iv_st<COSTTYPE, SIMDWIDTH> n_a_l =
+            m_label_set->label_from_offset(n_a, n_a_l_i);
+        const _iv_st<COSTTYPE, SIMDWIDTH> n_b_l =
+            m_label_set->label_from_offset(n_b, n_b_l_i);
 
-                p_costs = pcosts->get_pairwise_costs(
-                    iv_init<COSTTYPE, SIMDWIDTH>(n_a_l),
-                    iv_init<COSTTYPE, SIMDWIDTH>(n_b_l));
+        _v_t<COSTTYPE, SIMDWIDTH> p_costs = pcosts->get_pairwise_costs(
+            iv_init<COSTTYPE, SIMDWIDTH>(n_a_l),
+            iv_init<COSTTYPE, SIMDWIDTH>(n_b_l));
 
-                /* multiply with edge weight */
-                p_costs = v_mult<COSTTYPE, SIMDWIDTH>(p_costs,
-                    v_init<COSTTYPE, SIMDWIDTH>(e_weight));
+        p_costs = v_mult<COSTTYPE, SIMDWIDTH>(p_costs,
+            v_init<COSTTYPE, SIMDWIDTH>(e_weight));
 
+        v_store<COSTTYPE, SIMDWIDTH>(p_costs, tmp);
+        pairwise_sum += tmp[0];
+    }
+    obj += pairwise_sum;
 
-                /* extract first element of vector */
-                v_store<COSTTYPE, SIMDWIDTH>(p_costs, tmp);
-
-                my_chunk += tmp[0];
-            }
-
-            return my_chunk;
-        },
-        std::plus<COSTTYPE>());
-
-    return objective;
+    return obj;
 }
 
 /* ************************************************************************** */

@@ -9,11 +9,11 @@
 
 #include <atomic>
 #include <algorithm>
+#include <random>
 #include <queue>
 #include <iostream>
 
-#include <oneapi/tbb/blocked_range.h>
-#include <oneapi/tbb/parallel_for_each.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/multilevel_instances/group_same_label.h>
 
@@ -63,7 +63,7 @@ group_nodes(
     /* create seed "queue" */
     std::vector<luint_t> qu(num_nodes);
     std::iota(std::begin(qu), std::end(qu), 0);
-#if __cplusplus > 201100L
+#if MAPMAP_USE_STD_SHUFFLE
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(qu.begin(), qu.end(), g);

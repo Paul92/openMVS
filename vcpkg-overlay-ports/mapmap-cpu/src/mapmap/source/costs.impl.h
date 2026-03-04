@@ -9,8 +9,7 @@
 
 #include <iostream>
 
-#include <oneapi/tbb/parallel_for.h>
-#include <oneapi/tbb/blocked_range.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/costs.h>
 

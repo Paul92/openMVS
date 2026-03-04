@@ -162,8 +162,8 @@ protected:
     /* mutex for writing access to the graph */
     std::mutex m_graph_write_mutex;
 
-    /* allocator for working tables */
-    std::unique_ptr<tbb::tbb_allocator<_s_t<COSTTYPE, SIMDWIDTH>>>
+    /* allocator for working tables (std::allocator to avoid TBB allocator shutdown segfault) */
+    std::unique_ptr<std::allocator<_s_t<COSTTYPE, SIMDWIDTH>>>
         m_value_allocator;
 
     /* debug */

@@ -10,8 +10,7 @@
 #include <atomic>
 #include <algorithm>
 
-#include <oneapi/tbb/parallel_reduce.h>
-#include <oneapi/tbb/parallel_for.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/color.h>
 

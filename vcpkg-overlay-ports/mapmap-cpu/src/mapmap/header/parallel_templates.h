@@ -13,10 +13,7 @@
 #include <atomic>
 #include <vector>
 
-#include <oneapi/tbb/parallel_for.h>
-#include <oneapi/tbb/parallel_reduce.h>
-#include <oneapi/tbb/parallel_scan.h>
-#include <oneapi/tbb/blocked_range.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/defines.h>
 #include <mapmap/header/vector_types.h>

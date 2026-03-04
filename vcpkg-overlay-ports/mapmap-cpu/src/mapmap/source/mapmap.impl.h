@@ -262,7 +262,11 @@ set_logging_callback(
     const std::function<void (const luint_t, const _s_t<COSTTYPE, SIMDWIDTH>)>&
         callback)
 {
+#if defined(NDEBUG)
     m_use_callback = true;
+#else
+    m_use_callback = false;
+#endif
     m_callback = callback;
 }
 

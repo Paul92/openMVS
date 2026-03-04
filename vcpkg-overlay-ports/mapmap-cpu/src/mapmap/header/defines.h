@@ -45,4 +45,20 @@
 #define NS_MAPMAP_BEGIN namespace NS_MAPMAP {
 #define NS_MAPMAP_END }
 
+#if defined(_MSC_VER) && !defined(_MSVC_LANG)
+#define _MSVC_LANG 0L
+#endif
+
+#if defined(_MSVC_LANG)
+#define MAPMAP_LANG_LEVEL _MSVC_LANG
+#else
+#define MAPMAP_LANG_LEVEL __cplusplus
+#endif
+
+#if MAPMAP_LANG_LEVEL > 201103L
+#define MAPMAP_USE_STD_SHUFFLE 1
+#else
+#define MAPMAP_USE_STD_SHUFFLE 0
+#endif
+
 #endif /* __MAPMAP_DEFINES_H_ */

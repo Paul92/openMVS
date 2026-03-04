@@ -14,7 +14,7 @@
 #include <memory>
 #include <random>
 
-#include <oneapi/tbb/concurrent_vector.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/defines.h>
 #include <mapmap/header/graph.h>

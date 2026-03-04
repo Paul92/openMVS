@@ -306,8 +306,7 @@ CombinatorialDynamicProgramming<COSTTYPE, SIMDWIDTH, UNARY, PAIRWISE>::
 CombinatorialDynamicProgramming()
 : m_level(0),
   m_level_size(0),
-  m_value_allocator((tbb::tbb_allocator<_s_t<COSTTYPE, SIMDWIDTH>>*)
-    (new tbb::cache_aligned_allocator<_s_t<COSTTYPE, SIMDWIDTH>>))
+  m_value_allocator(new std::allocator<_s_t<COSTTYPE, SIMDWIDTH>>())
 {
 
 }

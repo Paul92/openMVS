@@ -13,10 +13,6 @@
 #include <memory>
 #include <vector>
 
-#include <oneapi/tbb/blocked_range.h>
-#include <oneapi/tbb/concurrent_vector.h>
-#include <oneapi/tbb/tbb_allocator.h>
-
 #include <mapmap/header/defines.h>
 #include <mapmap/header/tree.h>
 #include <mapmap/header/vector_types.h>
@@ -29,8 +25,9 @@
 
 NS_MAPMAP_BEGIN
 
+/* Use std::allocator - avoids TBB allocator which causes memory corruption */
 template<typename T>
-using tbb_allocator_ptr = std::shared_ptr<tbb::tbb_allocator<T>>;
+using tbb_allocator_ptr = std::shared_ptr<std::allocator<T>>;
 
 /* ************************************************************************** */
 
@@ -103,7 +100,7 @@ protected:
     std::vector<luint_t> m_queue_b;
 
     std::vector<luint_t> m_leaf_ids;
-    tbb::concurrent_vector<luint_t> m_root_ids;
+    std::vector<luint_t> m_root_ids;
 };
 
 NS_MAPMAP_END

@@ -7,6 +7,7 @@
  * of the BSD license. See the LICENSE file for details.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <stdexcept>
 #include <utility>
@@ -14,9 +15,7 @@
 #include <set>
 #include <iostream>
 
-#include <oneapi/tbb/parallel_for.h>
-#include <oneapi/tbb/blocked_range.h>
-#include <oneapi/tbb/concurrent_vector.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/parallel_templates.h>
 #include <mapmap/header/costs.h>
@@ -81,11 +80,9 @@ Multilevel(
     m_previous = NULL;
     m_current = &m_levels[0];
 
-    /* create allocator */
-    m_value_allocator = std::unique_ptr<tbb::tbb_allocator<_s_t<COSTTYPE,
-        SIMDWIDTH>>>(
-        (tbb::tbb_allocator<_s_t<COSTTYPE, SIMDWIDTH>> *)
-        new tbb::cache_aligned_allocator<_s_t<COSTTYPE, SIMDWIDTH>>);
+    /* create allocator (std::allocator to avoid TBB allocator shutdown segfault) */
+    m_value_allocator = std::unique_ptr<std::allocator<_s_t<COSTTYPE, SIMDWIDTH>>>(
+        new std::allocator<_s_t<COSTTYPE, SIMDWIDTH>>);
 }
 
 /* ************************************************************************** */
@@ -687,18 +684,22 @@ compute_level_unaries()
                 UnaryTable<COSTTYPE, SIMDWIDTH> * un_tab =
                     m_storage_unaries[store_offset + s_n].get();
 
-                const _iv_st<COSTTYPE, SIMDWIDTH> max_label =
+                const _iv_st<COSTTYPE, SIMDWIDTH> current_max_label =
                     m_current->level_label_set->max_label();
+                const _iv_st<COSTTYPE, SIMDWIDTH> prev_max_label =
+                    m_previous->level_label_set->max_label();
+                const _iv_st<COSTTYPE, SIMDWIDTH> max_label =
+                    std::max(current_max_label, prev_max_label);
+
                 const _iv_st<COSTTYPE, SIMDWIDTH> lset_size =
                     m_current->level_label_set->label_set_size(s_n);
 
                 /* add up costs for labels 0 to max_label */
-                const luint_t costs_size = DIV_UP(max_label + 1, SIMDWIDTH) *
-                    SIMDWIDTH * sizeof(_s_t<COSTTYPE, SIMDWIDTH>);
+                const luint_t costs_n = DIV_UP(max_label + 1, SIMDWIDTH) *
+                    SIMDWIDTH;
                 _s_t<COSTTYPE, SIMDWIDTH> * costs = m_value_allocator->
-                    allocate(costs_size);
-                std::fill(costs, costs + DIV_UP(max_label + 1, SIMDWIDTH) *
-                    SIMDWIDTH, 0);
+                    allocate(costs_n);
+                std::fill(costs, costs + costs_n, 0);
 
                 _iv_st<COSTTYPE, SIMDWIDTH> i_tmp[SIMDWIDTH];
                 _s_t<COSTTYPE, SIMDWIDTH> v_tmp[SIMDWIDTH];
@@ -833,7 +834,7 @@ compute_level_unaries()
                 }
 
                 /* clean up */
-                m_value_allocator->deallocate(costs, costs_size);
+                m_value_allocator->deallocate(costs, costs_n);
             }
         });
 }
@@ -1107,9 +1108,8 @@ compute_level_pairwise()
                     }
                 }
 
-                /* deallocate level assoc */
-                m_value_allocator->deallocate(buf,
-                    2 * m_current->level_label_set->max_label_set_size());
+                /* deallocate level assoc (must match allocate count) */
+                m_value_allocator->deallocate(buf, 2 * pad_size);
 
                 /* use pointer to costs */
                 m_current->level_cost_bundle->set_pairwise_costs(se_id,

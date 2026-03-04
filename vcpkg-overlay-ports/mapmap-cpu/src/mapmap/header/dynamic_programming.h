@@ -13,9 +13,7 @@
 #include <memory>
 #include <vector>
 
-#include <oneapi/tbb/blocked_range.h>
-#include <oneapi/tbb/concurrent_vector.h>
-#include <oneapi/tbb/tbb_allocator.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/defines.h>
 #include <mapmap/header/tree.h>
@@ -28,7 +26,7 @@
 NS_MAPMAP_BEGIN
 
 template<typename T>
-using tbb_allocator_ptr = std::shared_ptr<tbb::tbb_allocator<T>>; 
+using tbb_allocator_ptr = std::shared_ptr<std::allocator<T>>;
 
 template<typename COSTTYPE, uint_t SIMDWIDTH, typename UNARY, typename PAIRWISE>
 struct DPBundle

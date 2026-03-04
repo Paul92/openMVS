@@ -17,7 +17,7 @@
 #include <mapmap/header/tree.h>
 #include <mapmap/header/tree_sampler.h>
 
-#include <oneapi/tbb/concurrent_vector.h>
+#include <mapmap/source/parallel.h>
 
 NS_MAPMAP_BEGIN
 

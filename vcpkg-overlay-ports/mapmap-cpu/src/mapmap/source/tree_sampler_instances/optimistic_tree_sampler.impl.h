@@ -11,9 +11,7 @@
 
 #include <iostream>
 
-#include <oneapi/tbb/blocked_range.h>
-#include <oneapi/tbb/parallel_for.h>
-#include <oneapi/tbb/parallel_for_each.h>
+#include <mapmap/source/parallel.h>
 
 #include <mapmap/header/parallel_templates.h>
 
