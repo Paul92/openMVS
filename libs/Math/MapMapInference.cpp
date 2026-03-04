@@ -51,10 +51,21 @@ void MapMapInference::SetNumNodes(NodeID nNodes)
 	m_nodes.resize(nNodes);
 }
 
-void MapMapInference::SetNeighbors(NodeID nodeID1, NodeID nodeID2)
+void MapMapInference::ReserveNeighbors(std::size_t nEdges)
+{
+	m_edges.reserve(nEdges);
+}
+
+void MapMapInference::ReserveDataCosts(NodeID nodeID, std::size_t nCosts)
+{
+	ASSERT(nodeID < m_nodes.size());
+	m_nodes[nodeID].entries.reserve(nCosts);
+}
+
+void MapMapInference::SetNeighbors(NodeID nodeID1, NodeID nodeID2, EnergyType weight)
 {
 	ASSERT(nodeID1 < m_nodes.size() && nodeID2 < m_nodes.size());
-	m_edges.emplace_back(nodeID1, nodeID2);
+	m_edges.push_back({nodeID1, nodeID2, MAXF(weight, EnergyType(1e-3f))});
 }
 
 void MapMapInference::SetDataCost(LabelID label, NodeID nodeID, EnergyType cost)
@@ -124,13 +135,16 @@ MapMapInference::EnergyType MapMapInference::Optimize()
 	}
 
 	std::unique_ptr<GraphType> graph(new GraphType(m_nodes.size()));
-	for (const std::pair<NodeID, NodeID>& edge: m_edges)
-		graph->add_edge(edge.first, edge.second, CostType(1));
+	for (const Edge& edge: m_edges)
+		graph->add_edge(edge.nodeID1, edge.nodeID2, static_cast<CostType>(edge.weight));
 	graph->update_components();
 	graph->sort_incidence_lists();
 
 	std::unique_ptr<LabelSetType> labelSet(new LabelSetType(m_nodes.size(), false));
-	std::vector<std::unique_ptr<UnaryTableType>> unaries(m_nodes.size());
+	std::vector<UnaryTableType> unaries;
+	unaries.reserve(m_nodes.size());
+	std::vector<NS_MAPMAP::_iv_st<CostType, kSimdWidth>> labels;
+	std::vector<NS_MAPMAP::_s_t<CostType, kSimdWidth>> costs;
 
 	for (NodeID nodeID = 0; nodeID < m_nodes.size(); ++nodeID) {
 		std::vector<DataCost>& entries = m_nodes[nodeID].entries;
@@ -149,15 +163,15 @@ MapMapInference::EnergyType MapMapInference::Optimize()
 		}
 		entries.swap(uniqueEntries);
 
-		std::vector<NS_MAPMAP::_iv_st<CostType, kSimdWidth>> labels(entries.size());
-		std::vector<NS_MAPMAP::_s_t<CostType, kSimdWidth>> costs(entries.size());
+		labels.resize(entries.size());
+		costs.resize(entries.size());
 		for (size_t i = 0; i < entries.size(); ++i) {
 			labels[i] = static_cast<NS_MAPMAP::_iv_st<CostType, kSimdWidth>>(entries[i].label);
 			costs[i] = static_cast<NS_MAPMAP::_s_t<CostType, kSimdWidth>>(entries[i].cost);
 		}
 		labelSet->set_label_set_for_node(nodeID, labels);
-		unaries[nodeID] = std::unique_ptr<UnaryTableType>(new UnaryTableType(nodeID, labelSet.get()));
-		unaries[nodeID]->set_costs(costs);
+		unaries.emplace_back(nodeID, labelSet.get());
+		unaries.back().set_costs(costs);
 	}
 
 	std::unique_ptr<PairwisePottsType> pairwise(new PairwisePottsType(m_smoothPenalty * m_smoothScale));
@@ -166,7 +180,7 @@ MapMapInference::EnergyType MapMapInference::Optimize()
 	solver.set_graph(graph.get());
 	solver.set_label_set(labelSet.get());
 	for (NodeID nodeID = 0; nodeID < m_nodes.size(); ++nodeID)
-		solver.set_unary(nodeID, unaries[nodeID].get());
+		solver.set_unary(nodeID, &unaries[nodeID]);
 	solver.set_pairwise(pairwise.get());
 	solver.set_termination_criterion(termination.get());
 	// Set empty callback to disable mapMAP logging output

@@ -8,6 +8,7 @@
 #ifndef __MATH_MAPMAPINFERENCE_H__
 #define __MATH_MAPMAPINFERENCE_H__
 
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -30,7 +31,9 @@ public:
 	inline NodeID GetNumNodes() const { return (NodeID)m_nodes.size(); }
 	inline bool IsEmpty() const { return m_nodes.empty(); }
 
-	void SetNeighbors(NodeID nodeID1, NodeID nodeID2);
+	void ReserveNeighbors(std::size_t nEdges);
+	void ReserveDataCosts(NodeID nodeID, std::size_t nCosts);
+	void SetNeighbors(NodeID nodeID1, NodeID nodeID2, EnergyType weight = EnergyType(1));
 	void SetDataCost(LabelID label, NodeID nodeID, EnergyType cost);
 	void SetSmoothCost(FncSmoothCost func);
 	void SetSmoothScale(EnergyType scale);
@@ -46,12 +49,17 @@ private:
 	struct NodeCosts {
 		std::vector<DataCost> entries;
 	};
+	struct Edge {
+		NodeID nodeID1;
+		NodeID nodeID2;
+		EnergyType weight;
+	};
 
 	EnergyType AssignGreedyLabels();
 
 private:
 	std::vector<NodeCosts> m_nodes;
-	std::vector<std::pair<NodeID, NodeID>> m_edges;
+	std::vector<Edge> m_edges;
 	std::vector<LabelID> m_solution;
 	FncSmoothCost m_smoothFunc;
 	EnergyType m_smoothPenalty;
@@ -61,4 +69,3 @@ private:
 } // namespace SEACAVE
 
 #endif // __MATH_MAPMAPINFERENCE_H__
-
