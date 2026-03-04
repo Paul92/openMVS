@@ -30,12 +30,16 @@ endif()
 set(_mapmap_cpu_include_root "${CURRENT_PACKAGES_DIR}/include")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E make_directory "${_mapmap_cpu_include_root}/mapmap")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E make_directory "${_mapmap_cpu_include_root}/mapmap/ext")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E make_directory "${_mapmap_cpu_include_root}/ext")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_directory
     "${_mapmap_cpu_mapmap_dir}"
     "${_mapmap_cpu_include_root}/mapmap")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_directory
     "${_mapmap_cpu_ext_dir}"
     "${_mapmap_cpu_include_root}/mapmap/ext")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_directory
+    "${_mapmap_cpu_ext_dir}"
+    "${_mapmap_cpu_include_root}/ext")
 
 # Remove empty helper directories so post-build validation does not report
 # non-portable empty install folders.
