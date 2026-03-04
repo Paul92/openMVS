@@ -1,0 +1,7 @@
+{
+  "name": "mapmap-cpu",
+  "version-string": "2026-02-16-25ed696",
+  "description": "Header-only mapMAP CPU solver",
+  "homepage": "https://github.com/dthuerck/mapmap_cpu",
+  "license": "BSD-3-Clause"
+}

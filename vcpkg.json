@@ -17,6 +17,7 @@
     "eigen3",
     "libjxl",
     "libpng",
+    "mapmap-cpu",
     {
       "name": "opencv",
       "features": [

@@ -1,0 +1,8 @@
+mapmap-cpu provides a header-only target:
+
+  find_package(mapmap-cpu CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE mapmap-cpu::mapmap-cpu)
+
+Recommended include form:
+
+  #include <mapmap/full.h>
